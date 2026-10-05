@@ -66,7 +66,7 @@ opencode debug agent controlled     # shows the permission and enabled tools
 | --- | --- | --- |
 | `CONTROLLED_VISUALIZER_PORT` | `4599` | Visualizer HTTP/WebSocket port |
 | `CONTROLLED_VISUALIZER_TOKEN` | random per process | Visualizer access token |
-| `CONTROLLED_JEV_MODEL` | `opencode/jev-1.13` | Decision model for JEV (a bare id defaults to the `opencode` provider) |
+| `CONTROLLED_JEV_MODEL` | inherit the session model | Explicit decision model for JEV (a bare id defaults to the `opencode` provider) |
 | `CONTROLLED_JEV_TIMEOUT_MS` | `15000` | Decision model timeout before falling back |
 
 ## Usage
@@ -157,7 +157,14 @@ investigation should do; a deterministic layer enforces the hard constraints
 (user stop, budget, loop protection, capability availability, depth) and can
 override a model decision that violates them.
 
-- Default model: `opencode/jev-1.13`.
+- Model resolution, highest first:
+  1. an explicit model (plugin option, `CONTROLLED_JEV_MODEL`, tool or visualizer);
+  2. **the model the main agent is already using for that session** — the default;
+  3. `opencode/jev-1.13` as a last resort.
+- Inheriting the session model is deliberate: OpenCode's free tier (for example
+  the OpenCode Zen free models) can only be used from inside OpenCode, so JEV
+  runs its decision through the plugin client with that same model instead of
+  calling a provider directly.
 - The model runs through a hidden `controlled-jeve` agent (no tools) so the
   request carries only the JEV instruction and a compact context.
 - Each decision is one bounded call (`CONTROLLED_JEV_TIMEOUT_MS`, default
@@ -169,6 +176,8 @@ override a model decision that violates them.
   policy and reports the reason in `controlled_config`.
 - Set the model to `heuristic` to disable the model and use the deterministic
   policy only.
+- A free OpenCode Zen model works without configuration: run the `controlled`
+  agent with it and JEV reuses it.
 
 Change the decision model in any of these ways:
 

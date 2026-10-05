@@ -282,11 +282,11 @@ export class JevEngine {
     this.model = model
   }
 
-  async decide(input: JevInput, policy: JevPolicy = this.policy): Promise<JEVDecision> {
+  async decide(input: JevInput, policy: JevPolicy = this.policy, model: JevModel | null = this.model): Promise<JEVDecision> {
     const global = globalConstraints(input)
     if (global) return global
 
-    if (!this.model) {
+    if (!model) {
       const heuristic = decide(input, policy)
       heuristic.source = "heuristic"
       return heuristic
@@ -294,7 +294,7 @@ export class JevEngine {
 
     let output: JevModelOutput | null = null
     try {
-      output = await this.model.decide(buildJevRequest(input))
+      output = await model.decide(buildJevRequest(input))
     } catch {
       output = null
     }

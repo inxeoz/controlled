@@ -103,6 +103,9 @@ export interface ControlResult {
 interface SessionRuntime {
   session: InvestigationSession
   controller: Controller
+  jevModelId: string | null
+  jevModel: JevModel | null
+  jevModelResolved: boolean
   policy: JevPolicy
   restrictions: { deniedCapabilities: CapabilityId[]; maxDepth?: number }
   replaySpeed: number
@@ -122,10 +125,14 @@ const VERIFY_CAPABILITIES = new Set([
 export interface RuntimeOptions {
   events?: EventStore
   registry?: CapabilityRegistry
-  /** Decision model id, for example "opencode/jev-1.13-free". */
+  /** Explicit decision model id. "heuristic" disables the model. Null means inherit. */
   jevModelId?: string | null
   /** Builds a decision model for an id. Returns null when the id is unusable. */
   createJevModel?: (modelId: string) => JevModel | null
+  /** The model the main agent is using for a session, used when no model is set. */
+  resolveSessionModel?: (sessionId: string) => string | null
+  /** Last-resort model when neither an explicit model nor a session model exists. */
+  fallbackModelId?: string | null
 }
 
 export class ControlledRuntime {
@@ -134,25 +141,33 @@ export class ControlledRuntime {
   readonly root: string
   private readonly sessions = new Map<string, SessionRuntime>()
   private readonly jev: JevEngine
-  private jevModelId: string | null
-  private jevModelNote: string | null = null
+  private readonly explicitModel: string | null
   private readonly createJevModel?: (modelId: string) => JevModel | null
+  private readonly resolveSessionModel?: (sessionId: string) => string | null
+  private readonly fallbackModelId: string | null
+  private jevModelNote: string | null = null
 
   constructor(root: string, options: RuntimeOptions = {}) {
     this.root = path.resolve(root)
     this.events = options.events ?? new EventStore(path.join(this.root, ".opencode", "controlled", "events"))
     this.registry = options.registry ?? defaultRegistry
     this.createJevModel = options.createJevModel
-    this.jevModelId = options.jevModelId ?? null
-    this.jev = new JevEngine({
-      registry: this.registry,
-      model: this.jevModelId && this.createJevModel ? this.createJevModel(this.jevModelId) : null,
-    })
+    this.resolveSessionModel = options.resolveSessionModel
+    this.fallbackModelId = options.fallbackModelId ?? null
+    this.explicitModel = options.jevModelId ?? null
+    this.jev = new JevEngine({ registry: this.registry })
   }
 
-  /** The active decision model id, or "heuristic" when none is configured. */
-  getJevModel(): string {
-    return this.jevModelId ?? "heuristic"
+  /** The active decision model id for a session, or "heuristic" when none is used. */
+  getJevModel(sessionId?: string): string {
+    if (sessionId) {
+      const runtime = this.sessions.get(sessionId)
+      if (runtime) {
+        this.ensureSessionModel(runtime)
+        return runtime.jevModelId ?? "heuristic"
+      }
+    }
+    return this.explicitModel ?? "inherit (session model)"
   }
 
   /** Why the configured model is not active, when it is not. */
@@ -164,15 +179,34 @@ export class ControlledRuntime {
     this.jevModelNote = note
   }
 
+  /** Set the explicit default model for all sessions. */
   setJevModel(modelId: string | null): void {
-    this.jevModelId = modelId
-    this.jev.setModel(modelId && this.createJevModel ? this.createJevModel(modelId) : null)
+    for (const runtime of this.sessions.values()) this.applyModel(runtime, modelId)
   }
 
   /** Change the decision model and record it on a session when one is given. */
   configureJevModel(modelId: string | null, sessionId?: string): void {
-    this.setJevModel(modelId)
-    if (sessionId) this.events.append(sessionId, EVENT.JEV_MODEL_CHANGED, { model: this.getJevModel() })
+    const runtime = sessionId ? this.sessions.get(sessionId) : undefined
+    if (runtime) this.applyModel(runtime, modelId)
+    else this.setJevModel(modelId)
+    if (sessionId) this.events.append(sessionId, EVENT.JEV_MODEL_CHANGED, { model: this.getJevModel(sessionId) })
+  }
+
+  private applyModel(runtime: SessionRuntime, modelId: string | null): void {
+    runtime.jevModelId = modelId
+    runtime.jevModel = modelId && this.createJevModel ? this.createJevModel(modelId) : null
+    runtime.jevModelResolved = true
+  }
+
+  /** Resolve the session model once: explicit > inherited session model > default. */
+  private ensureSessionModel(runtime: SessionRuntime): void {
+    if (runtime.jevModelResolved) return
+    if (this.explicitModel) {
+      this.applyModel(runtime, this.explicitModel === "heuristic" ? null : this.explicitModel)
+      return
+    }
+    const inherited = this.resolveSessionModel?.(runtime.session.id) ?? null
+    this.applyModel(runtime, inherited ?? this.fallbackModelId ?? null)
   }
 
   start(options: StartOptions): { session: InvestigationSession; state: MachineState } {
@@ -208,6 +242,9 @@ export class ControlledRuntime {
     const runtime: SessionRuntime = {
       session,
       controller,
+      jevModelId: null,
+      jevModel: null,
+      jevModelResolved: false,
       policy: { ...DEFAULT_POLICY },
       restrictions: { deniedCapabilities: options.restrictions?.deniedCapabilities ?? [], maxDepth: options.restrictions?.maxDepth },
       replaySpeed: 1,
@@ -281,6 +318,7 @@ export class ControlledRuntime {
       return this.result(runtime, { verdict: "REJECT", decision: "ASK_USER", capability: null, executed: false, message: "The investigation is waiting for user input.", mustAskUser: true })
     }
 
+    this.ensureSessionModel(runtime)
     session.budget.llmIterations += 1
     const proposal: ActionProposal = {
       id: newProposalId(),
@@ -299,10 +337,11 @@ export class ControlledRuntime {
     const decision = await this.jev.decide(
       { proposal, context, machineState: controller.state, registry: this.registry, restrictions: { userStopped: session.status === "STOPPED", deniedCapabilities: runtime.restrictions.deniedCapabilities, maxDepth: runtime.restrictions.maxDepth } },
       runtime.policy,
+      runtime.jevModel,
     )
     decision.evidenceCount = session.evidence.length
-    if (decision.source === "heuristic" && this.jev.decisionModel !== "heuristic") {
-      this.events.append(sessionId, EVENT.JEV_FALLBACK, { model: this.jevModelId, reason: "The decision model was unavailable; the deterministic policy decided instead." })
+    if (decision.source === "heuristic" && runtime.jevModel) {
+      this.events.append(sessionId, EVENT.JEV_FALLBACK, { model: runtime.jevModelId, reason: "The decision model was unavailable; the deterministic policy decided instead." })
     }
     session.decisions.push(decision)
     this.events.append(sessionId, EVENT.JEV_DECISION, {
@@ -600,10 +639,11 @@ export class ControlledRuntime {
   snapshot(sessionId: string): Record<string, unknown> | null {
     const runtime = this.sessions.get(sessionId)
     if (!runtime) return null
+    this.ensureSessionModel(runtime)
     const session = runtime.session
     return {
       session,
-      jevModel: this.getJevModel(),
+      jevModel: this.getJevModel(sessionId),
       jevModelNote: this.jevModelNote,
       machine: { version: runtime.controller.version, state: runtime.controller.state, previous: runtime.controller.previous, states: runtime.controller.states(), transitions: runtime.controller.transitions(), available: runtime.controller.availableEvents(), pendingChanges: runtime.controller.pendingChanges },
       policy: runtime.policy,

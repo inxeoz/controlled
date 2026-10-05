@@ -14,13 +14,17 @@ import {
 import { createControlledTools } from "./tools/controlled"
 import { VisualizerServer } from "./visualizer/server"
 
-/** Resolve the decision model: plugin option, then environment, then default. */
-export function resolveJevModel(options?: PluginOptions): string {
+/**
+ * Resolve the explicit decision model: plugin option, then environment.
+ * Returns null when nothing is configured, which means "inherit the model the
+ * main agent is already using". Returns "heuristic" when the model is disabled.
+ */
+export function resolveJevModel(options?: PluginOptions): string | null {
   const fromOptions = options?.jevModel
   if (typeof fromOptions === "string" && fromOptions.trim()) return normalizeModelId(fromOptions) ?? "heuristic"
   const fromEnv = process.env.CONTROLLED_JEV_MODEL
   if (fromEnv && fromEnv.trim()) return normalizeModelId(fromEnv) ?? "heuristic"
-  return DEFAULT_JEV_MODEL
+  return null
 }
 
 /**
@@ -55,10 +59,15 @@ export const ControlledPlugin: Plugin = async (input: PluginInput, options?: Plu
       },
     })
 
-  const requestedModel = resolveJevModel(options)
+  // The model the main agent is using for a session. OpenCode's free tier is
+  // only usable from inside OpenCode, so the JEV call reuses that same model
+  // through the plugin client instead of calling a provider directly.
+  const sessionModels = new Map<string, string>()
   const runtime = new ControlledRuntime(input.directory, {
-    jevModelId: requestedModel === "heuristic" ? null : requestedModel,
+    jevModelId: resolveJevModel(options),
+    fallbackModelId: DEFAULT_JEV_MODEL,
     createJevModel,
+    resolveSessionModel: (sessionId) => sessionModels.get(sessionId) ?? null,
   })
   noteUnavailable = (note) => runtime.setJevModelNote(note)
   const visualizer = new VisualizerServer({ runtime, port: Number(process.env.CONTROLLED_VISUALIZER_PORT ?? 4599) })
@@ -87,6 +96,18 @@ export const ControlledPlugin: Plugin = async (input: PluginInput, options?: Plu
 
   return {
     tool: tools,
+
+    "chat.params": async (input) => {
+      if (input.model?.providerID && input.model?.id) {
+        sessionModels.set(input.sessionID, `${input.model.providerID}/${input.model.id}`)
+      }
+    },
+
+    "chat.message": async (input) => {
+      if (input.model?.providerID && input.model?.modelID) {
+        sessionModels.set(input.sessionID, `${input.model.providerID}/${input.model.modelID}`)
+      }
+    },
 
     config: async (config) => {
       config.agent = config.agent ?? {}

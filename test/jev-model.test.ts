@@ -151,7 +151,7 @@ describe("runtime decision model configuration", () => {
     expect(runtime.get(session.id)?.decisions[0].source).toBe("model")
 
     runtime.configureJevModel("fake/two", session.id)
-    expect(runtime.getJevModel()).toBe("fake/two")
+    expect(runtime.getJevModel(session.id)).toBe("fake/two")
     const types = runtime.events.all(session.id).map((event) => event.type)
     expect(types).toContain("JEV_MODEL_CHANGED")
   })
@@ -161,9 +161,27 @@ describe("runtime decision model configuration", () => {
     const { session } = runtime.start({ question: "q" })
     expect(runtime.control({ sessionId: session.id, command: "SET_JEV_MODEL", mode: "OBSERVE", payload: { model: "fake/two" } }).ok).toBe(false)
     expect(runtime.control({ sessionId: session.id, command: "SET_JEV_MODEL", mode: "MODIFY", payload: { model: "jev-1.13" } }).ok).toBe(true)
-    expect(runtime.getJevModel()).toBe("opencode/jev-1.13")
+    expect(runtime.getJevModel(session.id)).toBe("opencode/jev-1.13")
     expect(runtime.control({ sessionId: session.id, command: "SET_JEV_MODEL", mode: "MODIFY", payload: { model: "heuristic" } }).ok).toBe(true)
-    expect(runtime.getJevModel()).toBe("heuristic")
+    expect(runtime.getJevModel(session.id)).toBe("heuristic")
+  })
+
+  test("inherits the main agent's model when no decision model is configured", async () => {
+    const seen: string[] = []
+    const runtime = new ControlledRuntime(ROOT, {
+      events: new EventStore(null),
+      createJevModel: (id) => {
+        seen.push(id)
+        return new FakeModel({ decision: "EXPLORE", capability: "FUZZY_SEARCH", reason: "inherited model" })
+      },
+      resolveSessionModel: () => "opencode/muse-spark-1.3-contributor-free",
+    })
+    const { session } = runtime.start({ question: "find create_order" })
+    const step = await runtime.step(session.id, { capability: "EXACT_SEARCH", target: { query: "create_order" } })
+    expect(step.executed).toBe(true)
+    expect(seen).toContain("opencode/muse-spark-1.3-contributor-free")
+    expect(runtime.getJevModel(session.id)).toBe("opencode/muse-spark-1.3-contributor-free")
+    expect(runtime.get(session.id)?.decisions[0].source).toBe("model")
   })
 })
 
