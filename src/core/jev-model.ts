@@ -67,7 +67,15 @@ const GRAPH_CAPABILITIES = new Set<CapabilityId>(["CALL_GRAPH", "IMPORT_GRAPH", 
 const DISPOSITIONS: JEVDisposition[] = ["EXPLORE", "VERIFY", "ANSWER", "STOP", "ASK_USER"]
 
 /** The default decision model. Changeable through options, env or the visualizer. */
-export const DEFAULT_JEV_MODEL = "opencode/jev-1.13-free"
+export const DEFAULT_JEV_MODEL = "opencode/jev-1.13"
+
+/** Normalize a model id to `provider/model`. A bare id defaults to the opencode provider. */
+export function normalizeModelId(value: string | null | undefined): string | null {
+  if (value === null || value === undefined) return null
+  const trimmed = value.trim()
+  if (!trimmed || trimmed === "heuristic") return null
+  return trimmed.includes("/") ? trimmed : `opencode/${trimmed}`
+}
 export const DEFAULT_JEV_TIMEOUT_MS = 15000
 
 export function buildJevRequest(input: JevInput): JevModelRequest {

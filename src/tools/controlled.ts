@@ -1,4 +1,5 @@
 import { tool } from "@opencode-ai/plugin"
+import { normalizeModelId } from "../core/jev-model"
 import type { ControlledRuntime, StepResult } from "../core/runtime"
 import type { VisualizerServer } from "../visualizer/server"
 import type { CapabilityId, InvestigationIntent, InvestigationTarget } from "../core/types"
@@ -165,12 +166,7 @@ export function createControlledTools(deps: ToolDeps) {
       async execute(args, context) {
         const sessionId = requireSession(context.sessionID)
         if (args.jevModel !== undefined) {
-          const value = args.jevModel.trim()
-          const model = value === "" || value === "heuristic" ? null : value
-          if (model !== null && !model.includes("/")) {
-            return "The decision model must be provider/model, for example opencode/jev-1.13-free."
-          }
-          runtime.configureJevModel(model, sessionId ?? undefined)
+          runtime.configureJevModel(normalizeModelId(args.jevModel), sessionId ?? undefined)
         }
         const snapshot = sessionId ? runtime.snapshot(sessionId) : null
         const policy = snapshot?.policy as Record<string, number> | undefined

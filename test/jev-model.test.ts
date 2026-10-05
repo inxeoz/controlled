@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import path from "node:path"
 import { EventStore } from "../src/core/events"
-import { buildJevRequest, JevEngine, OpenCodeJevModel, parseJevOutput, DEFAULT_JEV_MODEL, type JevModel, type JevModelOutput } from "../src/core/jev-model"
+import { buildJevRequest, JevEngine, OpenCodeJevModel, parseJevOutput, normalizeModelId, DEFAULT_JEV_MODEL, type JevModel, type JevModelOutput } from "../src/core/jev-model"
 import { CapabilityRegistry } from "../src/core/registry"
 import { createBudget } from "../src/core/budget"
 import { ControlledRuntime } from "../src/core/runtime"
@@ -119,7 +119,15 @@ describe("JEV engine", () => {
   })
 
   test("the default decision model id is the documented default", () => {
-    expect(DEFAULT_JEV_MODEL).toBe("opencode/jev-1.13-free")
+    expect(DEFAULT_JEV_MODEL).toBe("opencode/jev-1.13")
+  })
+
+  test("normalizes bare model ids to the opencode provider", () => {
+    expect(normalizeModelId("jev-1.13")).toBe("opencode/jev-1.13")
+    expect(normalizeModelId("opencode/jev-1.13")).toBe("opencode/jev-1.13")
+    expect(normalizeModelId("openrouter/google/gemma-4-31b-it:free")).toBe("openrouter/google/gemma-4-31b-it:free")
+    expect(normalizeModelId("heuristic")).toBeNull()
+    expect(normalizeModelId("")).toBeNull()
   })
 })
 
@@ -148,13 +156,14 @@ describe("runtime decision model configuration", () => {
     expect(types).toContain("JEV_MODEL_CHANGED")
   })
 
-  test("SET_JEV_MODEL requires MODIFY mode and a provider/model id", () => {
+  test("SET_JEV_MODEL requires MODIFY mode and normalizes bare ids", () => {
     const runtime = new ControlledRuntime(ROOT, { events: new EventStore(null), jevModelId: "fake/one", createJevModel: () => new FakeModel({ decision: "STOP", reason: "x" }) })
     const { session } = runtime.start({ question: "q" })
     expect(runtime.control({ sessionId: session.id, command: "SET_JEV_MODEL", mode: "OBSERVE", payload: { model: "fake/two" } }).ok).toBe(false)
-    expect(runtime.control({ sessionId: session.id, command: "SET_JEV_MODEL", mode: "MODIFY", payload: { model: "nope" } }).ok).toBe(false)
-    expect(runtime.control({ sessionId: session.id, command: "SET_JEV_MODEL", mode: "MODIFY", payload: { model: "fake/two" } }).ok).toBe(true)
-    expect(runtime.getJevModel()).toBe("fake/two")
+    expect(runtime.control({ sessionId: session.id, command: "SET_JEV_MODEL", mode: "MODIFY", payload: { model: "jev-1.13" } }).ok).toBe(true)
+    expect(runtime.getJevModel()).toBe("opencode/jev-1.13")
+    expect(runtime.control({ sessionId: session.id, command: "SET_JEV_MODEL", mode: "MODIFY", payload: { model: "heuristic" } }).ok).toBe(true)
+    expect(runtime.getJevModel()).toBe("heuristic")
   })
 })
 

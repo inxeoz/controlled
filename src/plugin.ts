@@ -1,5 +1,5 @@
 import type { Hooks, Plugin, PluginInput, PluginOptions } from "@opencode-ai/plugin"
-import { DEFAULT_JEV_MODEL, DEFAULT_JEV_TIMEOUT_MS, OpenCodeJevModel, type JevModel } from "./core/jev-model"
+import { DEFAULT_JEV_MODEL, DEFAULT_JEV_TIMEOUT_MS, OpenCodeJevModel, normalizeModelId, type JevModel } from "./core/jev-model"
 import { ControlledRuntime } from "./core/runtime"
 import { createModelAvailability, createModelInvoker, type ProvidersClient } from "./model-invoker"
 import {
@@ -17,9 +17,9 @@ import { VisualizerServer } from "./visualizer/server"
 /** Resolve the decision model: plugin option, then environment, then default. */
 export function resolveJevModel(options?: PluginOptions): string {
   const fromOptions = options?.jevModel
-  if (typeof fromOptions === "string" && fromOptions.trim()) return fromOptions.trim()
+  if (typeof fromOptions === "string" && fromOptions.trim()) return normalizeModelId(fromOptions) ?? "heuristic"
   const fromEnv = process.env.CONTROLLED_JEV_MODEL
-  if (fromEnv && fromEnv.trim()) return fromEnv.trim()
+  if (fromEnv && fromEnv.trim()) return normalizeModelId(fromEnv) ?? "heuristic"
   return DEFAULT_JEV_MODEL
 }
 

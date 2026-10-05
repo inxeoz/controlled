@@ -66,7 +66,7 @@ opencode debug agent controlled     # shows the permission and enabled tools
 | --- | --- | --- |
 | `CONTROLLED_VISUALIZER_PORT` | `4599` | Visualizer HTTP/WebSocket port |
 | `CONTROLLED_VISUALIZER_TOKEN` | random per process | Visualizer access token |
-| `CONTROLLED_JEV_MODEL` | `opencode/jev-1.13-free` | Decision model for JEV |
+| `CONTROLLED_JEV_MODEL` | `opencode/jev-1.13` | Decision model for JEV (a bare id defaults to the `opencode` provider) |
 | `CONTROLLED_JEV_TIMEOUT_MS` | `15000` | Decision model timeout before falling back |
 
 ## Usage
@@ -157,7 +157,7 @@ investigation should do; a deterministic layer enforces the hard constraints
 (user stop, budget, loop protection, capability availability, depth) and can
 override a model decision that violates them.
 
-- Default model: `opencode/jev-1.13-free`.
+- Default model: `opencode/jev-1.13`.
 - The model runs through a hidden `controlled-jeve` agent (no tools) so the
   request carries only the JEV instruction and a compact context.
 - Each decision is one bounded call (`CONTROLLED_JEV_TIMEOUT_MS`, default

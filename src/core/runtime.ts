@@ -6,7 +6,7 @@ import { createBudget, budgetRemaining } from "./budget"
 import { EVENT, EventStore, type ControlledEvent } from "./events"
 import { newProposalId, newSessionId } from "./ids"
 import { DEFAULT_POLICY, evidenceSufficient, averageConfidence, coverageGaps, type JevPolicy } from "./jev"
-import { JevEngine, type JevModel } from "./jev-model"
+import { JevEngine, normalizeModelId, type JevModel } from "./jev-model"
 import { ALL_GUARDS_PASS, Controller, baseMachine, type GuardFlags, type MachineState, type RuntimeChange, type RuntimeChangeType } from "./machine"
 import { CapabilityRegistry, registry as defaultRegistry } from "./registry"
 import type {
@@ -561,11 +561,7 @@ export class ControlledRuntime {
       case "SET_JEV_MODEL": {
         const denied = requireModify()
         if (denied) return this.reject(session.id, denied)
-        const raw = payload.model
-        const model = raw === null || raw === undefined || raw === "" || raw === "heuristic" ? null : String(raw)
-        if (model !== null && !model.includes("/")) {
-          return this.reject(session.id, { ok: false, command: request.command, message: "The decision model must be provider/model, for example opencode/jev-1.13-free." })
-        }
+        const model = normalizeModelId(payload.model === undefined ? undefined : String(payload.model))
         this.configureJevModel(model, session.id)
         return { ok: true, command: request.command, message: `Decision model set to ${this.getJevModel()}.`, state: controller.state }
       }
