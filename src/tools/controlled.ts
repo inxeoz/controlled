@@ -156,6 +156,33 @@ export function createControlledTools(deps: ToolDeps) {
       },
     }),
 
+    controlled_config: tool({
+      description:
+        "Read or change the Controlled Mode configuration. With no arguments it reports the current decision model, budget and JEV policy. Pass jevModel to change the decision model used by JEV (for example opencode/jev-1.13-free, or 'heuristic' to use the deterministic policy).",
+      args: {
+        jevModel: tool.schema.string().optional().describe("Decision model as provider/model, or 'heuristic' to disable the model."),
+      },
+      async execute(args, context) {
+        const sessionId = requireSession(context.sessionID)
+        if (args.jevModel !== undefined) {
+          const value = args.jevModel.trim()
+          const model = value === "" || value === "heuristic" ? null : value
+          if (model !== null && !model.includes("/")) {
+            return "The decision model must be provider/model, for example opencode/jev-1.13-free."
+          }
+          runtime.configureJevModel(model, sessionId ?? undefined)
+        }
+        const snapshot = sessionId ? runtime.snapshot(sessionId) : null
+        const policy = snapshot?.policy as Record<string, number> | undefined
+        return [
+          `decision model: ${runtime.getJevModel()}`,
+          `visualizer: ${visualizer.running ? visualizer.url : "not running"}`,
+          policy ? `policy: ${JSON.stringify(policy)}` : "policy: (no session)",
+          sessionId ? `session: ${sessionId}` : "session: none",
+        ].join("\n")
+      },
+    }),
+
     decision_visualize: tool({
       description:
         "Start the local Decision Visualizer web interface for Controlled Mode and return its URL. The visualizer shows the XState graph, current state, JEV decisions, evidence, the execution timeline, the budget and live controls (pause, resume, stop, step, speed, replay, live XState modification).",

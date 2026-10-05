@@ -66,6 +66,8 @@ opencode debug agent controlled     # shows the permission and enabled tools
 | --- | --- | --- |
 | `CONTROLLED_VISUALIZER_PORT` | `4599` | Visualizer HTTP/WebSocket port |
 | `CONTROLLED_VISUALIZER_TOKEN` | random per process | Visualizer access token |
+| `CONTROLLED_JEV_MODEL` | `opencode/jev-1.13-free` | Decision model for JEV |
+| `CONTROLLED_JEV_TIMEOUT_MS` | `15000` | Decision model timeout before falling back |
 
 ## Usage
 
@@ -147,6 +149,43 @@ Default escalation: `EXACT_SEARCH -> FUZZY_SEARCH -> SEMANTIC_SEARCH`, and
 structural analysis before graph traversal. JEV also downgrades an expensive
 proposal to a cheaper capability that can still produce evidence, and limits
 graph depth rather than rejecting an otherwise useful action.
+
+### Decision model (JEV model)
+
+JEV is model-backed by default. The decision model decides what the
+investigation should do; a deterministic layer enforces the hard constraints
+(user stop, budget, loop protection, capability availability, depth) and can
+override a model decision that violates them.
+
+- Default model: `opencode/jev-1.13-free`.
+- The model runs through a hidden `controlled-jeve` agent (no tools) so the
+  request carries only the JEV instruction and a compact context.
+- Each decision is one bounded call (`CONTROLLED_JEV_TIMEOUT_MS`, default
+  `15000`). On timeout, error or an unparseable answer, JEV falls back to the
+  deterministic policy and records a `JEV_FALLBACK` event.
+- Set the model to `heuristic` to disable the model and use the deterministic
+  policy only.
+
+Change the decision model in any of these ways:
+
+```jsonc
+// 1. plugin option in opencode.json
+{ "plugin": [["opencode-controlled-mode", { "jevModel": "opencode/space-bunny-free" }]] }
+```
+
+```bash
+# 2. environment
+CONTROLLED_JEV_MODEL=opencode/space-bunny-free opencode
+```
+
+```text
+# 3. in a session (MODIFY mode in the visualizer, or the tool)
+controlled_config { "jevModel": "opencode/space-bunny-free" }
+# visualizer -> MODIFY -> SET_JEV_MODEL
+```
+
+Every change is recorded as a `JEV_MODEL_CHANGED` event. The visualizer header
+shows the active decision model.
 
 ### XState controller
 
@@ -271,6 +310,10 @@ persistent repository graphs, remote visualizer, and multi-agent investigations.
   not the number of actions.
 - **Evidence sufficiency** is a policy decision. Defaults are conservative; the
   visualizer can change the policy for the current session in MODIFY mode.
+- **Decision model latency.** A free decision model can take several seconds per
+  decision (and longer on a cold start). The default 15s timeout falls back to
+  the deterministic policy when the model is too slow. Raise
+  `CONTROLLED_JEV_TIMEOUT_MS` for a slow model.
 - **Ports.** The visualizer uses `127.0.0.1:4599` by default.
 
 ## Spec mapping
@@ -278,7 +321,7 @@ persistent repository graphs, remote visualizer, and multi-agent investigations.
 | Spec area | Implementation |
 | --- | --- |
 | §6-10 investigation loop, LLM tasks | `core/runtime.ts`, `prompts.ts` |
-| §11-17 JEV | `core/jev.ts` |
+| §11-17 JEV | `core/jev.ts`, `core/jev-model.ts` |
 | §18-24, §46 XState + escalation | `core/machine.ts`, `core/jev.ts` |
 | §25-27 AST | `capabilities/lang.ts`, `capabilities/frameworks.ts`, `capabilities/execute.ts` |
 | §28-35 symbol/API | `capabilities/execute.ts`, `capabilities/index.ts` |

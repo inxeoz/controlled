@@ -68,6 +68,7 @@ const HTML = `<!doctype html>
   <span class="badge" id="speed">1x</span>
   <span class="badge" id="budget">-</span>
   <span class="badge" id="mode">OBSERVE</span>
+  <span class="badge" id="jevModel">JEV: -</span>
   <span class="row" style="margin-left:auto">
     <select id="sessionSelect" title="Session"></select>
     <button id="modeObserve">OBSERVE</button>
@@ -130,6 +131,10 @@ const HTML = `<!doctype html>
         <button id="removeState">REMOVE_STATE</button>
         <button id="disableState">DISABLE_STATE</button>
         <button id="enableState">ENABLE_STATE</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <input id="jevModelInput" placeholder="JEV MODEL (provider/model)" />
+        <button id="setJevModel">SET_JEV_MODEL</button>
       </div>
       <div class="row" style="margin-top:8px">
         <input id="fromState" placeholder="FROM" />
@@ -219,6 +224,7 @@ const HTML = `<!doctype html>
     q("budget").textContent = session.budget.actions + "/" + session.budget.maxActions + " actions";
     q("mode").textContent = mode;
     q("speed").textContent = snapshot.speed.execution + "x";
+    q("jevModel").textContent = "JEV: " + (snapshot.jevModel || "heuristic");
 
     var states = q("states");
     states.innerHTML = "";
@@ -308,6 +314,7 @@ const HTML = `<!doctype html>
   q("disableState").onclick = function () { command("DISABLE_STATE", { id: q("newState").value.trim().toUpperCase() }); };
   q("enableState").onclick = function () { command("ENABLE_STATE", { id: q("newState").value.trim().toUpperCase() }); };
   q("addTransition").onclick = function () { command("ADD_TRANSITION", { from: q("fromState").value.trim().toUpperCase(), event: q("eventName").value.trim().toUpperCase(), to: q("toState").value.trim().toUpperCase() }); };
+  q("setJevModel").onclick = function () { command("SET_JEV_MODEL", { model: q("jevModelInput").value.trim() }); };
   q("sessionSelect").onchange = function (e) { sessionId = e.target.value; loadSnapshot().then(loadTimeline).then(connect); };
 
   setMode("OBSERVE");

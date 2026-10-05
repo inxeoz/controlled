@@ -1,18 +1,50 @@
-import type { Hooks, Plugin, PluginInput } from "@opencode-ai/plugin"
+import type { Hooks, Plugin, PluginInput, PluginOptions } from "@opencode-ai/plugin"
+import { DEFAULT_JEV_MODEL, DEFAULT_JEV_TIMEOUT_MS, OpenCodeJevModel, type JevModel } from "./core/jev-model"
 import { ControlledRuntime } from "./core/runtime"
-import { CONTROLLED_AGENT_DESCRIPTION, CONTROLLED_AGENT_PROMPT, DECISION_VISUALIZE_DESCRIPTION, DECISION_VISUALIZE_TEMPLATE } from "./prompts"
+import { createModelInvoker } from "./model-invoker"
+import {
+  CONTROLLED_AGENT_DESCRIPTION,
+  CONTROLLED_AGENT_PROMPT,
+  DECISION_VISUALIZE_DESCRIPTION,
+  DECISION_VISUALIZE_TEMPLATE,
+  JEV_AGENT_DESCRIPTION,
+  JEV_AGENT_ID,
+  JEV_MODEL_SYSTEM,
+} from "./prompts"
 import { createControlledTools } from "./tools/controlled"
 import { VisualizerServer } from "./visualizer/server"
+
+/** Resolve the decision model: plugin option, then environment, then default. */
+export function resolveJevModel(options?: PluginOptions): string {
+  const fromOptions = options?.jevModel
+  if (typeof fromOptions === "string" && fromOptions.trim()) return fromOptions.trim()
+  const fromEnv = process.env.CONTROLLED_JEV_MODEL
+  if (fromEnv && fromEnv.trim()) return fromEnv.trim()
+  return DEFAULT_JEV_MODEL
+}
 
 /**
  * The Controlled Mode server plugin.
  *
  * It registers the investigation tools, the `controlled` primary agent, the
- * `/decision-visualize` command and the local visualizer server. It is
- * read-only: it never registers an edit, write or shell tool.
+ * hidden `controlled-jeve` decision agent, the `/decision-visualize` command
+ * and the local visualizer server. It is read-only: it never registers an edit,
+ * write or shell tool.
  */
-export const ControlledPlugin: Plugin = async (input: PluginInput): Promise<Hooks> => {
-  const runtime = new ControlledRuntime(input.directory)
+export const ControlledPlugin: Plugin = async (input: PluginInput, options?: PluginOptions): Promise<Hooks> => {
+  const jevModelId = resolveJevModel(options)
+  const timeoutMs = Number(process.env.CONTROLLED_JEV_TIMEOUT_MS ?? DEFAULT_JEV_TIMEOUT_MS)
+  const invoke = createModelInvoker(input.client, { agent: JEV_AGENT_ID, timeoutMs })
+  const createJevModel = (modelId: string): JevModel =>
+    new OpenCodeJevModel({
+      id: modelId,
+      model: modelId,
+      system: JEV_MODEL_SYSTEM,
+      invoke,
+      timeoutMs,
+    })
+
+  const runtime = new ControlledRuntime(input.directory, { jevModelId, createJevModel })
   const visualizer = new VisualizerServer({ runtime, port: Number(process.env.CONTROLLED_VISUALIZER_PORT ?? 4599) })
   const tools = createControlledTools({ runtime, visualizer })
 
@@ -33,6 +65,7 @@ export const ControlledPlugin: Plugin = async (input: PluginInput): Promise<Hook
     controlled_step: "allow",
     controlled_finish: "allow",
     controlled_status: "allow",
+    controlled_config: "allow",
     decision_visualize: "allow",
   } as never
 
@@ -49,6 +82,15 @@ export const ControlledPlugin: Plugin = async (input: PluginInput): Promise<Hook
         // Read-only: only the controlled investigation tools are permitted.
         tools: controlledTools,
         permission: controlledPermissions,
+      }
+      // The decision agent has no tools and carries the JEV instruction.
+      config.agent[JEV_AGENT_ID] = {
+        description: JEV_AGENT_DESCRIPTION,
+        mode: "subagent",
+        hidden: true,
+        prompt: JEV_MODEL_SYSTEM,
+        tools: { "*": false } as never,
+        permission: { "*": "deny" } as never,
       }
       config.command = config.command ?? {}
       config.command["decision-visualize"] = {

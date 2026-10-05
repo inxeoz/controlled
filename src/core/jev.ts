@@ -87,20 +87,17 @@ export function averageConfidence(context: InvestigationContext): number {
  * It never executes a capability and never returns an XState transition
  * (role.md sections 2 and 5).
  */
-export function decide(input: JevInput, policy: JevPolicy = DEFAULT_POLICY): JEVDecision {
-  const { proposal, context, registry } = input
+/**
+ * Constraints the decision model may never override: user stop, exhausted
+ * budget and a repeated action sequence with no new evidence (spec sections
+ * 45, 49, 83). They are checked before any model call.
+ */
+export function globalConstraints(input: JevInput): JEVDecision | null {
+  const { proposal, context } = input
   const restrictions = input.restrictions ?? {}
 
   if (restrictions.userStopped) {
     return decision(input, { decision: "STOP", verdict: "STOP", reason: "The user stopped the investigation." })
-  }
-
-  if (restrictions.deniedCapabilities?.includes(proposal.capability)) {
-    return decision(input, {
-      decision: "EXPLORE",
-      verdict: "REJECT",
-      reason: `Capability ${proposal.capability} is not permitted for this session.`,
-    })
   }
 
   const remaining = budgetRemaining(context.budget)
@@ -112,6 +109,35 @@ export function decide(input: JevInput, policy: JevPolicy = DEFAULT_POLICY): JEV
       confidence: averageConfidence(context),
     })
   }
+
+  const loop = detectLoop(proposal, context)
+  if (loop) {
+    return decision(input, {
+      decision: "STOP",
+      verdict: "STOP",
+      reason: `Repeated action sequence detected for ${loop} with no new evidence.`,
+    })
+  }
+
+  return null
+}
+
+export function decide(input: JevInput, policy: JevPolicy = DEFAULT_POLICY): JEVDecision {
+  const { proposal, context, registry } = input
+  const restrictions = input.restrictions ?? {}
+
+  const global = globalConstraints(input)
+  if (global) return global
+
+  if (restrictions.deniedCapabilities?.includes(proposal.capability)) {
+    return decision(input, {
+      decision: "EXPLORE",
+      verdict: "REJECT",
+      reason: `Capability ${proposal.capability} is not permitted for this session.`,
+    })
+  }
+
+  const remaining = budgetRemaining(context.budget)
 
   const capability = registry.get(proposal.capability)
   if (!capability) {
@@ -189,17 +215,6 @@ export function decide(input: JevInput, policy: JevPolicy = DEFAULT_POLICY): JEV
     }
   }
 
-  // Loop protection (spec section 83): a repeated state sequence with no new
-  // evidence means further exploration is not useful.
-  const loop = detectLoop(proposal, context)
-  if (loop) {
-    return decision(input, {
-      decision: "STOP",
-      verdict: "STOP",
-      reason: `Repeated action sequence detected for ${loop} with no new evidence.`,
-    })
-  }
-
   // Budget cost check: XState enforces hard limits, JEV respects them.
   if (capability.cost > remaining) {
     return decision(input, {
@@ -259,7 +274,7 @@ export function decide(input: JevInput, policy: JevPolicy = DEFAULT_POLICY): JEV
   })
 }
 
-function detectLoop(proposal: ActionProposal, context: InvestigationContext): string | null {
+export function detectLoop(proposal: ActionProposal, context: InvestigationContext): string | null {
   const history: Array<{ capability: CapabilityId | undefined; count: number | undefined }> = [
     ...context.decisions.slice(-4).map((item) => ({ capability: item.capability, count: item.evidenceCount })),
     { capability: proposal.capability, count: context.evidence.length },
@@ -280,7 +295,7 @@ function constraintOf(proposal: ActionProposal): InvestigationConstraints {
   return {}
 }
 
-function isVerification(capability: CapabilityId): boolean {
+export function isVerification(capability: CapabilityId): boolean {
   return capability.endsWith("_CHECK")
 }
 

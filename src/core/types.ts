@@ -140,6 +140,8 @@ export interface JEVDecision {
   score?: number
   /** Evidence count when the decision was made; used for loop protection. */
   evidenceCount?: number
+  /** Who produced the decision: the decision model or the deterministic policy. */
+  source?: "model" | "heuristic" | "model-overridden"
   at: string
 }
 
