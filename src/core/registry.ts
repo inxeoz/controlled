@@ -42,6 +42,7 @@ export const BASE_CAPABILITIES: Capability[] = [
   cap({ id: "FIND_CALLERS", category: "SYMBOL", description: "Locate functions that call a target function.", cost: 3, depthCost: 1, expectedInformationGain: 0.8, canCreateGraphEdges: true, produces: ["CALL"] }),
   cap({ id: "FIND_CALLEES", category: "SYMBOL", description: "Locate functions called by a target function.", cost: 3, depthCost: 1, expectedInformationGain: 0.8, canCreateGraphEdges: true, produces: ["CALL"] }),
   cap({ id: "FIND_IMPLEMENTATIONS", category: "SYMBOL", description: "Find implementations of an interface or abstract symbol.", cost: 3, depthCost: 1, expectedInformationGain: 0.6, produces: ["DEFINITION"] }),
+  cap({ id: "READ_SYMBOL", category: "SYMBOL", description: "Read the body of a symbol definition.", cost: 2, depthCost: 0, expectedInformationGain: 0.85, produces: ["DEFINITION"] }),
 
   // API
   cap({ id: "ROUTE_SEARCH", category: "API", description: "Locate API routes.", cost: 2, depthCost: 1, expectedInformationGain: 0.8, produces: ["ROUTE"] }),

@@ -55,7 +55,8 @@ describe("search capabilities", () => {
     const result = CAPABILITY_FNS.EXACT_SEARCH({ target: { query: "create_order" }, parameters: {}, constraints: {} }, ctx())
     expect(result.ok).toBe(true)
     expect(result.evidence.length).toBeGreaterThan(0)
-    expect(result.evidence.every((item) => item.type === "SEARCH_MATCH")).toBe(true)
+    expect(result.evidence.every((item) => item.type === "SEARCH_MATCH" || item.type === "DEFINITION")).toBe(true)
+    expect(result.evidence.some((item) => item.type === "DEFINITION")).toBe(true)
   })
 
   test("FILENAME_SEARCH finds files by name", () => {

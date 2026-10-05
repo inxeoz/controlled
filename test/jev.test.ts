@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { DEFAULT_POLICY, decide, evidenceSufficient } from "../src/core/jev"
 import { CapabilityRegistry } from "../src/core/registry"
 import { createBudget } from "../src/core/budget"
-import type { ActionProposal, InvestigationContext } from "../src/core/types"
+import type { ActionProposal, Evidence, InvestigationContext } from "../src/core/types"
 
 function proposal(capability: string, target: Record<string, unknown> = {}, parameters: Record<string, unknown> = {}): ActionProposal {
   return { id: "pr_1", capability, target, parameters, reason: "test", expectedResult: "test" }
@@ -85,12 +85,23 @@ describe("JEV decision engine", () => {
     expect(decision.constraints?.maxDepth).toBe(4)
   })
 
-  test("ANSWER when evidence is already sufficient", () => {
-    const evidence = Array.from({ length: 8 }, (_, index) => ({ id: "e" + index, type: "DEFINITION" as const, file: "a.ts", lineStart: index, lineEnd: index, symbol: "s", relation: null, confidence: 0.9, discoveredBy: "FIND_DEFINITION" }))
+  test("ANSWER when the intent's required evidence is covered", () => {
+    const evidence: Evidence[] = Array.from({ length: 8 }, (_, index) => ({ id: "e" + index, type: "DEFINITION", file: "a.ts", lineStart: index, lineEnd: index, symbol: "s" + index, relation: null, confidence: 0.9, discoveredBy: "FIND_DEFINITION" }))
+    evidence.push({ id: "e_route", type: "ROUTE", file: "a.ts", lineStart: 1, lineEnd: 1, symbol: "handler", relation: "GET", confidence: 0.9, discoveredBy: "ROUTE_SEARCH" })
     const budget = createBudget()
     budget.actions = 5
     const decision = decide({ proposal: proposal("EXACT_SEARCH", { query: "x" }), context: context({ evidence, budget }), machineState: "JEV_DECISION", registry })
     expect(decision.decision).toBe("ANSWER")
+  })
+
+  test("does not ANSWER a structural question without its required evidence", () => {
+    const evidence: Evidence[] = Array.from({ length: 20 }, (_, index) => ({ id: "e" + index, type: "SEARCH_MATCH", file: "a.ts", lineStart: index, lineEnd: index, symbol: null, relation: null, confidence: 0.9, discoveredBy: "EXACT_SEARCH" }))
+    const budget = createBudget()
+    budget.actions = 5
+    const decision = decide({ proposal: proposal("EXACT_SEARCH", { query: "x" }), context: context({ evidence, budget }), machineState: "JEV_DECISION", registry })
+    expect(decision.decision).not.toBe("ANSWER")
+    expect(decision.verdict).toBe("MODIFY")
+    expect(decision.capability).toBe("ROUTE_SEARCH")
   })
 
   test("ASK_USER for two equally relevant definitions", () => {

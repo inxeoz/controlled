@@ -1,6 +1,6 @@
 import path from "node:path"
 import { detectJsonSchema, detectRoutes, detectSchemas, type RouteDef, type SchemaDef } from "./frameworks"
-import { languageOf, normalizePath, readText, walk, type WalkedFile } from "./fs"
+import { classifyFile, FILE_KIND_RANK, languageOf, normalizePath, readText, walk, type FileKind, type WalkedFile } from "./fs"
 import { parseFile, type CallSite, type FileIndex, type ImportDef, type SymbolDef } from "./lang"
 import { rankCandidates } from "./similarity"
 import { findCycles } from "./graph-utils"
@@ -11,11 +11,33 @@ export interface SearchMatch {
   line: number
   text: string
   column: number
+  /** A definition line outranks a plain reference. */
+  kind: "definition" | "reference"
+  fileKind: FileKind
+  /** The declared symbol when the match is a definition line. */
+  symbol?: string | null
+}
+
+export interface SearchResult {
+  matches: SearchMatch[]
+  total: number
+  truncated: boolean
+}
+
+export interface SearchOptions {
+  limit?: number
+  offset?: number
+  caseSensitive?: boolean
+  /** Restrict the search to paths starting with this prefix. */
+  pathPrefix?: string
+  /** Restrict the search to these file kinds. */
+  kinds?: FileKind[]
 }
 
 export interface SymbolHit {
   file: string
   line: number
+  endLine: number
   symbol: string
   symbolType: string
   container: string | null
@@ -125,64 +147,91 @@ export class CodeIndex {
     const needle = pattern.toLowerCase()
     return this.fileList()
       .filter((file) => file.toLowerCase().includes(needle))
+      .sort((a, b) => FILE_KIND_RANK[classifyFile(b)] - FILE_KIND_RANK[classifyFile(a)] || a.length - b.length)
       .slice(0, limit)
   }
 
-  exactSearch(query: string, options: { limit?: number; files?: string[]; caseSensitive?: boolean } = {}): SearchMatch[] {
+  searchExact(query: string, options: SearchOptions = {}): SearchResult {
     this.ensure()
     const limit = options.limit ?? 50
+    const offset = options.offset ?? 0
     const needle = options.caseSensitive ? query : query.toLowerCase()
-    const out: SearchMatch[] = []
+    const prefix = options.pathPrefix ? normalizePath(options.pathPrefix) : ""
+    const collected: SearchMatch[] = []
+    const MAX_SCAN = 5000
+    const matchesAllowed = (file: string, fileKind: FileKind) => {
+      if (prefix && !file.startsWith(prefix)) return false
+      if (options.kinds && !options.kinds.includes(fileKind)) return false
+      return true
+    }
     for (const index of this.indexes.values()) {
-      if (options.files && !options.files.includes(index.file)) continue
+      const fileKind = classifyFile(index.file)
+      if (!matchesAllowed(index.file, fileKind)) continue
       for (let i = 0; i < index.lines.length; i++) {
         const line = index.lines[i]
         const haystack = options.caseSensitive ? line : line.toLowerCase()
         const column = haystack.indexOf(needle)
-        if (column >= 0) {
-          out.push({ file: index.file, line: i + 1, text: line.trim().slice(0, 300), column })
-          if (out.length >= limit) return out
+        if (column < 0) continue
+        const symbol = index.symbols.find((item) => item.line === i + 1)
+        collected.push({ file: index.file, line: i + 1, text: line.trim().slice(0, 300), column, kind: symbol ? "definition" : "reference", fileKind, symbol: symbol?.name ?? null })
+        if (collected.length >= MAX_SCAN) break
+      }
+      if (collected.length >= MAX_SCAN) break
+    }
+    if (collected.length < MAX_SCAN) {
+      for (const file of this.files) {
+        const relative = normalizePath(file.relative)
+        if (this.indexes.has(relative)) continue
+        const fileKind = classifyFile(relative)
+        if (!matchesAllowed(relative, fileKind)) continue
+        const text = readText(file.absolute)
+        const lines = text.split("\n")
+        for (let i = 0; i < lines.length; i++) {
+          const haystack = options.caseSensitive ? lines[i] : lines[i].toLowerCase()
+          const column = haystack.indexOf(needle)
+          if (column < 0) continue
+          collected.push({ file: relative, line: i + 1, text: lines[i].trim().slice(0, 300), column, kind: "reference", fileKind })
+          if (collected.length >= MAX_SCAN) break
         }
+        if (collected.length >= MAX_SCAN) break
       }
     }
-    // Also scan non-code text files.
-    for (const file of this.files) {
-      if (this.indexes.has(normalizePath(file.relative))) continue
-      if (options.files && !options.files.includes(normalizePath(file.relative))) continue
-      const text = readText(file.absolute)
-      const lines = text.split("\n")
-      for (let i = 0; i < lines.length; i++) {
-        const haystack = options.caseSensitive ? lines[i] : lines[i].toLowerCase()
-        const column = haystack.indexOf(needle)
-        if (column >= 0) {
-          out.push({ file: normalizePath(file.relative), line: i + 1, text: lines[i].trim().slice(0, 300), column })
-          if (out.length >= limit) return out
-        }
-      }
-    }
-    return out
+    const ranked = rankMatches(collected)
+    const matches = ranked.slice(offset, offset + limit)
+    return { matches, total: ranked.length, truncated: ranked.length > offset + matches.length }
   }
 
-  textSearch(pattern: string, options: { limit?: number } = {}): SearchMatch[] {
+  exactSearch(query: string, options: SearchOptions = {}): SearchMatch[] {
+    return this.searchExact(query, options).matches
+  }
+
+  textSearch(pattern: string, options: SearchOptions = {}): SearchResult {
     this.ensure()
     let regex: RegExp
     try {
       regex = new RegExp(pattern, "i")
     } catch {
-      return this.exactSearch(pattern, options)
+      return this.searchExact(pattern, options)
     }
     const limit = options.limit ?? 50
-    const out: SearchMatch[] = []
+    const offset = options.offset ?? 0
+    const prefix = options.pathPrefix ? normalizePath(options.pathPrefix) : ""
+    const collected: SearchMatch[] = []
     for (const index of this.indexes.values()) {
+      const fileKind = classifyFile(index.file)
+      if (prefix && !index.file.startsWith(prefix)) continue
+      if (options.kinds && !options.kinds.includes(fileKind)) continue
       for (let i = 0; i < index.lines.length; i++) {
         const match = regex.exec(index.lines[i])
-        if (match) {
-          out.push({ file: index.file, line: i + 1, text: index.lines[i].trim().slice(0, 300), column: match.index })
-          if (out.length >= limit) return out
-        }
+        if (!match) continue
+        const symbol = index.symbols.find((item) => item.line === i + 1)
+        collected.push({ file: index.file, line: i + 1, text: index.lines[i].trim().slice(0, 300), column: match.index, kind: symbol ? "definition" : "reference", fileKind, symbol: symbol?.name ?? null })
+        if (collected.length >= 5000) break
       }
     }
-    return out
+    const ranked = rankMatches(collected)
+    const matches = ranked.slice(offset, offset + limit)
+    return { matches, total: ranked.length, truncated: ranked.length > offset + matches.length }
   }
 
   fuzzy(query: string, limit = 20) {
@@ -387,6 +436,7 @@ export class CodeIndex {
     return {
       file: symbol.file,
       line: symbol.line,
+      endLine: symbol.endLine,
       symbol: symbol.name,
       symbolType: symbol.kind,
       container: symbol.container,
@@ -398,4 +448,16 @@ export class CodeIndex {
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+}
+
+function rankMatches(matches: SearchMatch[]): SearchMatch[] {
+  return [...matches].sort((a, b) => {
+    if (a.kind !== b.kind) return a.kind === "definition" ? -1 : 1
+    const rank = FILE_KIND_RANK[b.fileKind] - FILE_KIND_RANK[a.fileKind]
+    if (rank !== 0) return rank
+    const depth = a.file.split("/").length - b.file.split("/").length
+    if (depth !== 0) return depth
+    if (a.file !== b.file) return a.file < b.file ? -1 : 1
+    return a.line - b.line
+  })
 }

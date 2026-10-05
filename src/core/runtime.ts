@@ -5,7 +5,7 @@ import { mergeGraph } from "../capabilities/graph-utils"
 import { createBudget, budgetRemaining } from "./budget"
 import { EVENT, EventStore, type ControlledEvent } from "./events"
 import { newProposalId, newSessionId } from "./ids"
-import { DEFAULT_POLICY, evidenceSufficient, averageConfidence, type JevPolicy } from "./jev"
+import { DEFAULT_POLICY, evidenceSufficient, averageConfidence, coverageGaps, type JevPolicy } from "./jev"
 import { JevEngine, type JevModel } from "./jev-model"
 import { ALL_GUARDS_PASS, Controller, baseMachine, type GuardFlags, type MachineState, type RuntimeChange, type RuntimeChangeType } from "./machine"
 import { CapabilityRegistry, registry as defaultRegistry } from "./registry"
@@ -50,6 +50,8 @@ export interface StepResult {
   mustAnswer: boolean
   mustAskUser: boolean
   question?: string
+  /** Required evidence still missing, with the capability that closes it. */
+  gaps: Array<{ id: string; description: string; capability: string }>
   error?: string
 }
 
@@ -133,6 +135,7 @@ export class ControlledRuntime {
   private readonly sessions = new Map<string, SessionRuntime>()
   private readonly jev: JevEngine
   private jevModelId: string | null
+  private jevModelNote: string | null = null
   private readonly createJevModel?: (modelId: string) => JevModel | null
 
   constructor(root: string, options: RuntimeOptions = {}) {
@@ -150,6 +153,15 @@ export class ControlledRuntime {
   /** The active decision model id, or "heuristic" when none is configured. */
   getJevModel(): string {
     return this.jevModelId ?? "heuristic"
+  }
+
+  /** Why the configured model is not active, when it is not. */
+  getJevModelNote(): string | null {
+    return this.jevModelNote
+  }
+
+  setJevModelNote(note: string | null): void {
+    this.jevModelNote = note
   }
 
   setJevModel(modelId: string | null): void {
@@ -305,6 +317,7 @@ export class ControlledRuntime {
       depth: context.depth,
       budget: session.budget,
       source: decision.source,
+      gaps: coverageGaps(context).map((gap) => ({ id: gap.id, description: gap.description, capability: gap.suggestedCapability })),
     })
 
     if (decision.decision === "STOP") {
@@ -595,6 +608,7 @@ export class ControlledRuntime {
     return {
       session,
       jevModel: this.getJevModel(),
+      jevModelNote: this.jevModelNote,
       machine: { version: runtime.controller.version, state: runtime.controller.state, previous: runtime.controller.previous, states: runtime.controller.states(), transitions: runtime.controller.transitions(), available: runtime.controller.availableEvents(), pendingChanges: runtime.controller.pendingChanges },
       policy: runtime.policy,
       registry: this.registry.snapshot(),
@@ -677,6 +691,7 @@ export class ControlledRuntime {
       mustAnswer: partial.mustAnswer ?? false,
       mustAskUser: partial.mustAskUser ?? false,
       question: partial.question,
+      gaps: coverageGaps(this.context(session.id) as InvestigationContext).map((gap) => ({ id: gap.id, description: gap.description, capability: gap.suggestedCapability })),
       error: partial.error,
     }
     runtime.lastStep = result
@@ -698,6 +713,7 @@ export class ControlledRuntime {
       message: `Unknown session ${sessionId}.`,
       mustAnswer: false,
       mustAskUser: false,
+      gaps: [],
       error: "unknown_session",
     }
   }
@@ -730,6 +746,7 @@ const REQUIRES_TARGET = new Set<CapabilityId>([
   "FIND_CALLERS",
   "FIND_CALLEES",
   "FIND_IMPLEMENTATIONS",
+  "READ_SYMBOL",
   "AST_FUNCTION",
   "AST_CLASS",
   "AST_SCHEMA",

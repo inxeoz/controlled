@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test"
 import path from "node:path"
 import { EventStore } from "../src/core/events"
-import { buildJevRequest, JevEngine, parseJevOutput, DEFAULT_JEV_MODEL, type JevModel, type JevModelOutput } from "../src/core/jev-model"
+import { buildJevRequest, JevEngine, OpenCodeJevModel, parseJevOutput, DEFAULT_JEV_MODEL, type JevModel, type JevModelOutput } from "../src/core/jev-model"
 import { CapabilityRegistry } from "../src/core/registry"
 import { createBudget } from "../src/core/budget"
 import { ControlledRuntime } from "../src/core/runtime"
-import { extractText, parseModelId } from "../src/model-invoker"
+import { createModelAvailability, extractText, parseModelId } from "../src/model-invoker"
 import type { ActionProposal, InvestigationContext, JEVDecision } from "../src/core/types"
 
 const ROOT = path.resolve(import.meta.dir, "../fixtures/sample-repo")
@@ -155,6 +155,42 @@ describe("runtime decision model configuration", () => {
     expect(runtime.control({ sessionId: session.id, command: "SET_JEV_MODEL", mode: "MODIFY", payload: { model: "nope" } }).ok).toBe(false)
     expect(runtime.control({ sessionId: session.id, command: "SET_JEV_MODEL", mode: "MODIFY", payload: { model: "fake/two" } }).ok).toBe(true)
     expect(runtime.getJevModel()).toBe("fake/two")
+  })
+})
+
+describe("decision model availability", () => {
+  test("an unavailable model is never called and falls back", async () => {
+    let invoked = 0
+    const model = new OpenCodeJevModel({
+      id: "opencode/jev-1.13-free",
+      model: "opencode/jev-1.13-free",
+      system: "s",
+      invoke: async () => {
+        invoked++
+        return "{}"
+      },
+      available: async () => false,
+    })
+    const engine = new JevEngine({ registry: new CapabilityRegistry(), model })
+    const decision = await engine.decide(input() as never)
+    expect(decision.source).toBe("heuristic")
+    expect(invoked).toBe(0)
+  })
+
+  test("the catalog is read once and unknown models are rejected", async () => {
+    let calls = 0
+    const client = {
+      config: {
+        providers: async () => {
+          calls++
+          return { data: { providers: [{ id: "opencode", models: { "space-bunny-free": {}, "fledge-alpha-free": {} } }] } }
+        },
+      },
+    }
+    const isAvailable = createModelAvailability(client)
+    expect(await isAvailable("opencode/space-bunny-free")).toBe(true)
+    expect(await isAvailable("opencode/jev-1.13-free")).toBe(false)
+    expect(calls).toBe(1)
   })
 })
 

@@ -8,6 +8,61 @@ export interface ModelInvokerOptions {
   onError?: (error: Error) => void
 }
 
+export interface ProvidersClient {
+  config: {
+    providers(input?: { query?: { directory?: string } }): Promise<{ data?: { providers: Array<{ id: string; models?: Record<string, unknown> }> }; error?: unknown }>
+  }
+}
+
+/**
+ * The set of `provider/model` ids the connected instance knows, or null when the
+ * catalog could not be read. Used to avoid calling a model that does not exist.
+ */
+export async function availableModels(client: ProvidersClient): Promise<Set<string> | null> {
+  try {
+    const result = await client.config.providers()
+    if (result.error || !result.data) return null
+    const set = new Set<string>()
+    for (const provider of result.data.providers ?? []) {
+      for (const modelId of Object.keys(provider.models ?? {})) set.add(`${provider.id}/${modelId}`)
+    }
+    return set
+  } catch {
+    return null
+  }
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return new Promise<T>((resolve) => {
+    const timer = setTimeout(() => resolve(fallback), ms)
+    promise.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      () => {
+        clearTimeout(timer)
+        resolve(fallback)
+      },
+    )
+  })
+}
+
+/**
+ * Lazy, cached, bounded model availability check. It must never block plugin
+ * startup: the catalog is read on the first decision and only once. An unknown
+ * or unreadable catalog is treated as "not available" so a missing model can
+ * never produce a visible provider error.
+ */
+export function createModelAvailability(client: ProvidersClient, timeoutMs = 5000): (modelId: string) => Promise<boolean> {
+  let cached: Promise<Set<string> | null> | null = null
+  return async (modelId: string) => {
+    if (!cached) cached = withTimeout(availableModels(client), timeoutMs, null)
+    const set = await cached
+    return set !== null && set.has(modelId)
+  }
+}
+
 interface SessionClient {
   session: {
     create(input: { body?: { title?: string } }): Promise<{ data?: { id: string }; error?: unknown }>

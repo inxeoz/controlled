@@ -10,7 +10,8 @@ import type {
   InvestigationSession,
   InvestigationTarget,
 } from "../core/types"
-import { getIndex, type CodeIndex } from "./index"
+import { FILE_KIND_RANK, type FileKind } from "./fs"
+import { getIndex, type CodeIndex, type SearchMatch, type SearchOptions, type SearchResult } from "./index"
 
 export interface CapabilityContext {
   index: CodeIndex
@@ -61,26 +62,12 @@ function nodeId(kind: string, label: string): string {
 export const CAPABILITY_FNS: Record<string, CapabilityFn> = {
   EXACT_SEARCH(input, ctx) {
     const value = query(input.target, input.parameters)
-    const matches = ctx.index.exactSearch(value, { limit: limitOf(input.constraints, 50) })
-    return empty("EXACT_SEARCH", matches.length ? `Found ${matches.length} exact match(es) for "${value}".` : `No exact match for "${value}".`, {
-      evidence: matches.map((match) =>
-        evidence({ type: "SEARCH_MATCH", file: match.file, lineStart: match.line, lineEnd: match.line, confidence: 0.9, discoveredBy: "EXACT_SEARCH", snippet: match.text, data: { column: match.column, query: value } }),
-      ),
-      filesTouched: touched(matches.map((match) => match.file)),
-      meta: { count: matches.length, query: value },
-    })
+    return searchResult("EXACT_SEARCH", value, ctx.index.searchExact(value, searchOptions(input)), 0.9)
   },
 
   TEXT_SEARCH(input, ctx) {
     const value = query(input.target, input.parameters)
-    const matches = ctx.index.textSearch(value, { limit: limitOf(input.constraints, 50) })
-    return empty("TEXT_SEARCH", `Found ${matches.length} text match(es) for /${value}/.`, {
-      evidence: matches.map((match) =>
-        evidence({ type: "SEARCH_MATCH", file: match.file, lineStart: match.line, lineEnd: match.line, confidence: 0.6, discoveredBy: "TEXT_SEARCH", snippet: match.text }),
-      ),
-      filesTouched: touched(matches.map((match) => match.file)),
-      meta: { count: matches.length },
-    })
+    return searchResult("TEXT_SEARCH", value, ctx.index.textSearch(value, searchOptions(input)), 0.6)
   },
 
   FILENAME_SEARCH(input, ctx) {
@@ -275,6 +262,35 @@ export const CAPABILITY_FNS: Record<string, CapabilityFn> = {
     })
   },
 
+  READ_SYMBOL(input, ctx) {
+    const value = query(input.target, input.parameters)
+    const hits = ctx.index.findDefinition(value, 5)
+    const out: Evidence[] = []
+    for (const hit of hits) {
+      const file = ctx.index.getFile(hit.file)
+      const body = file ? file.lines.slice(hit.line - 1, Math.min(hit.endLine, hit.line + 79)).join("\n") : ""
+      out.push(
+        evidence({
+          type: "DEFINITION",
+          file: hit.file,
+          lineStart: hit.line,
+          lineEnd: hit.endLine,
+          symbol: hit.symbol,
+          relation: "body",
+          confidence: 0.95,
+          discoveredBy: "READ_SYMBOL",
+          snippet: body.slice(0, 4000),
+          data: { symbolType: hit.symbolType, params: hit.params, signature: hit.signature, lines: hit.endLine - hit.line + 1 },
+        }),
+      )
+    }
+    return empty("READ_SYMBOL", hits.length ? `Read ${hits.length} definition body(ies) for "${value}".` : `No definition found for "${value}" in the explored codebase.`, {
+      evidence: out,
+      filesTouched: touched(out.map((item) => item.file)),
+      meta: { count: hits.length },
+    })
+  },
+
   FIND_IMPLEMENTATIONS(input, ctx) {
     const value = query(input.target, input.parameters)
     const hits = ctx.index.findImplementations(value, limitOf(input.constraints, 50))
@@ -331,7 +347,7 @@ export const CAPABILITY_FNS: Record<string, CapabilityFn> = {
 
   VALIDATION(input, ctx) {
     const value = query(input.target, input.parameters) || (input.target?.field ?? "")
-    const matches = ctx.index.textSearch(`(validate|validation|check|assert|is_valid|Validator|min_length|max_length|required).*${value}`, { limit: limitOf(input.constraints, 50) })
+    const matches = ctx.index.textSearch(`(validate|validation|check|assert|is_valid|Validator|min_length|max_length|required).*${value}`, searchOptions(input)).matches
     return empty("VALIDATION", `Found ${matches.length} validation-related match(es) for "${value}".`, {
       evidence: matches.map((match) => evidence({ type: "REFERENCE", file: match.file, lineStart: match.line, lineEnd: match.line, symbol: value, relation: "validates", confidence: 0.6, discoveredBy: "VALIDATION", snippet: match.text })),
       filesTouched: touched(matches.map((match) => match.file)),
@@ -341,7 +357,7 @@ export const CAPABILITY_FNS: Record<string, CapabilityFn> = {
 
   AUTHORIZATION(input, ctx) {
     const value = query(input.target, input.parameters)
-    const matches = ctx.index.textSearch(`(auth|permission|guard|login_required|requires|role|scope|@UseGuards|Depends\\().*${value}`, { limit: limitOf(input.constraints, 50) })
+    const matches = ctx.index.textSearch(`(auth|permission|guard|login_required|requires|role|scope|@UseGuards|Depends\\()).*${value}`, searchOptions(input)).matches
     return empty("AUTHORIZATION", `Found ${matches.length} authorization-related match(es).`, {
       evidence: matches.map((match) => evidence({ type: "REFERENCE", file: match.file, lineStart: match.line, lineEnd: match.line, symbol: value, relation: "authorizes", confidence: 0.55, discoveredBy: "AUTHORIZATION", snippet: match.text })),
       filesTouched: touched(matches.map((match) => match.file)),
@@ -511,6 +527,52 @@ export const CAPABILITY_FNS: Record<string, CapabilityFn> = {
       meta: { average, min, max, count: values.length },
     })
   },
+}
+
+function searchOptions(input: CapabilityInput): SearchOptions {
+  const target = input.target ?? {}
+  return {
+    limit: limitOf(input.constraints, 50),
+    offset: Number(input.parameters.offset ?? 0),
+    pathPrefix: (input.parameters.pathPrefix as string | undefined) ?? target.file ?? undefined,
+    caseSensitive: Boolean(input.parameters.caseSensitive),
+    kinds: input.parameters.kinds as FileKind[] | undefined,
+  }
+}
+
+function confidenceForMatch(match: SearchMatch, base: number): number {
+  const kindFactor = match.kind === "definition" ? 1 : 0.75
+  return Number((base * kindFactor * (0.5 + 0.5 * FILE_KIND_RANK[match.fileKind])).toFixed(3))
+}
+
+/** Build evidence, a truncation-aware message and per-file counts for a search. */
+function searchResult(capability: CapabilityId, value: string, search: SearchResult, baseConfidence: number): ExecutionResult {
+  const byFile = new Map<string, number>()
+  for (const match of search.matches) byFile.set(match.file, (byFile.get(match.file) ?? 0) + 1)
+  const topFiles = [...byFile.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([file, count]) => ({ file, count }))
+  const truncated = search.truncated
+  const message =
+    search.total === 0
+      ? `No ${capability} match for "${value}" in the explored codebase.`
+      : `Found ${search.total} match(es) for "${value}"; showing ${search.matches.length}${truncated ? " (truncated, narrow with pathPrefix)" : ""}. Top files: ${topFiles.slice(0, 5).map((item) => `${item.file} (${item.count})`).join(", ") || "(none)"}`
+  return empty(capability, message, {
+    evidence: search.matches.map((match) =>
+      evidence({
+        type: match.kind === "definition" ? "DEFINITION" : "SEARCH_MATCH",
+        file: match.file,
+        lineStart: match.line,
+        lineEnd: match.line,
+        confidence: confidenceForMatch(match, baseConfidence),
+        discoveredBy: capability,
+        relation: match.kind,
+        symbol: match.symbol ?? null,
+        snippet: match.text,
+        data: { column: match.column, query: value, fileKind: match.fileKind },
+      }),
+    ),
+    filesTouched: touched(search.matches.map((match) => match.file)),
+    meta: { count: search.matches.length, total: search.total, truncated, query: value, byFile: topFiles },
+  })
 }
 
 export function signatureOf(input: { target: InvestigationTarget | null; parameters: Record<string, unknown> }): string {

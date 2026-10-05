@@ -174,12 +174,14 @@ export function createControlledTools(deps: ToolDeps) {
         }
         const snapshot = sessionId ? runtime.snapshot(sessionId) : null
         const policy = snapshot?.policy as Record<string, number> | undefined
+        const note = runtime.getJevModelNote()
         return [
           `decision model: ${runtime.getJevModel()}`,
+          note ? `note: ${note}` : "",
           `visualizer: ${visualizer.running ? visualizer.url : "not running"}`,
           policy ? `policy: ${JSON.stringify(policy)}` : "policy: (no session)",
           sessionId ? `session: ${sessionId}` : "session: none",
-        ].join("\n")
+        ].filter(Boolean).join("\n")
       },
     }),
 
@@ -223,6 +225,9 @@ function formatStep(result: StepResult): string {
   lines.push(`evidence total: ${result.evidenceCount}`)
   lines.push(`graph: ${result.graphSummary.nodes} nodes / ${result.graphSummary.edges} edges`)
   lines.push(`budget: ${result.budget.actions}/${result.budget.maxActions} actions, ${result.budget.llmIterations}/${result.budget.maxLLMIterations} LLM iterations`)
+  if (result.gaps.length) {
+    lines.push(`missing evidence: ${result.gaps.map((gap) => `${gap.description} (use ${gap.capability})`).join("; ")}`)
+  }
   if (result.mustAskUser) lines.push(`ASK_USER: ${result.question ?? "The investigation needs user input."}`)
   if (result.mustAnswer) lines.push("NEXT: call controlled_finish with the final answer.")
   else if (!result.mustAskUser) lines.push("NEXT: propose another controlled_step, or call controlled_finish if the evidence is sufficient.")

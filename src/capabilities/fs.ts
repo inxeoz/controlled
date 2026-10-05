@@ -160,3 +160,52 @@ export function languageOf(ext: string): string {
 export function normalizePath(value: string): string {
   return value.split(path.sep).join("/")
 }
+
+export type FileKind = "source" | "test" | "generated" | "fixture" | "docs" | "config" | "script"
+
+const GENERATED_MARKERS = [
+  "generated",
+  "auto-generated",
+  ".gen.",
+  "gen_",
+  "vendor",
+  "dist/",
+  "build/",
+  "postman",
+  "bruno",
+  "hurl-api",
+  "json-api",
+  "openapi",
+  "swagger",
+]
+const TEST_MARKERS = ["test_", "_test.", ".test.", ".spec.", "/tests/", "/test/", "__tests__"]
+const FIXTURE_MARKERS = ["fixture", "test-data", "testdata", "mock", "sample"]
+const DOC_EXTENSIONS = new Set([".md", ".mdx", ".txt", ".rst", ".adoc"])
+const CONFIG_EXTENSIONS = new Set([".json", ".jsonc", ".yaml", ".yml", ".toml", ".ini", ".env", ".lock"])
+
+/**
+ * Classify a path so search results can be ranked. Generated clients, fixtures
+ * and scripts must not outrank real source.
+ */
+export function classifyFile(relative: string): FileKind {
+  const value = normalizePath(relative).toLowerCase()
+  const ext = path.extname(value)
+  if (value.startsWith("scripts/") || value.includes("/scripts/")) return "script"
+  if (GENERATED_MARKERS.some((marker) => value.includes(marker))) return "generated"
+  if (TEST_MARKERS.some((marker) => value.includes(marker))) return "test"
+  if (FIXTURE_MARKERS.some((marker) => value.includes(marker))) return "fixture"
+  if (DOC_EXTENSIONS.has(ext)) return "docs"
+  if (CONFIG_EXTENSIONS.has(ext)) return "config"
+  return "source"
+}
+
+/** Higher is more relevant. Source ranks above scripts, tests, fixtures and generated output. */
+export const FILE_KIND_RANK: Record<FileKind, number> = {
+  source: 1,
+  script: 0.5,
+  test: 0.4,
+  config: 0.35,
+  fixture: 0.3,
+  docs: 0.25,
+  generated: 0.15,
+}

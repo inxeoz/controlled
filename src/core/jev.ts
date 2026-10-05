@@ -4,11 +4,117 @@ import type { CapabilityRegistry } from "./registry"
 import type {
   ActionProposal,
   CapabilityId,
+  EvidenceType,
   InvestigationConstraints,
   InvestigationContext,
   InvestigationIntent,
+  InvestigationTarget,
   JEVDecision,
 } from "./types"
+
+/** One evidence group an intent needs before the investigation may answer. */
+export interface Requirement {
+  id: string
+  /** Evidence types that satisfy the requirement. */
+  kinds: EvidenceType[]
+  /** Capability that produces the requirement. */
+  capability: CapabilityId
+  description: string
+}
+
+export interface CoverageGap extends Requirement {
+  /** Capability that should close the gap. */
+  suggestedCapability: CapabilityId
+}
+
+/**
+ * Intent -> required evidence. A question is answerable only when its required
+ * evidence groups are present (or their capability was attempted). Raw search
+ * matches alone never satisfy a structural requirement.
+ */
+const REQUIREMENTS: Partial<Record<InvestigationIntent, Requirement[]>> = {
+  FIND_API: [
+    { id: "route", kinds: ["ROUTE"], capability: "ROUTE_SEARCH", description: "an API route" },
+    { id: "handler", kinds: ["DEFINITION"], capability: "FIND_DEFINITION", description: "the handler definition" },
+  ],
+  ROUTE_ANALYSIS: [
+    { id: "route", kinds: ["ROUTE"], capability: "ROUTE_SEARCH", description: "an API route" },
+    { id: "handler", kinds: ["DEFINITION"], capability: "FIND_DEFINITION", description: "the handler definition" },
+  ],
+  FIND_RELATED_API: [
+    { id: "route", kinds: ["ROUTE"], capability: "ROUTE_SEARCH", description: "an API route" },
+    { id: "call", kinds: ["CALL", "GRAPH_EDGE"], capability: "FIND_CALLEES", description: "a call relationship" },
+  ],
+  FIND_FUNCTION: [{ id: "definition", kinds: ["DEFINITION"], capability: "FIND_DEFINITION", description: "the function definition" }],
+  FIND_DEFINITION: [{ id: "definition", kinds: ["DEFINITION"], capability: "FIND_DEFINITION", description: "the symbol definition" }],
+  UNDERSTAND_FUNCTION: [
+    { id: "definition", kinds: ["DEFINITION"], capability: "FIND_DEFINITION", description: "the function definition" },
+    { id: "callee", kinds: ["CALL", "GRAPH_EDGE"], capability: "FIND_CALLEES", description: "its callees" },
+  ],
+  FIND_REFERENCE: [{ id: "reference", kinds: ["REFERENCE", "CALL", "IMPORT"], capability: "FIND_REFERENCES", description: "references to the symbol" }],
+  IMPACT_ANALYSIS: [
+    { id: "reference", kinds: ["REFERENCE"], capability: "FIND_REFERENCES", description: "references" },
+    { id: "caller", kinds: ["CALL"], capability: "FIND_CALLERS", description: "callers" },
+  ],
+  SAFE_REMOVAL: [
+    { id: "schema", kinds: ["SCHEMA", "PARAMETER"], capability: "AST_SCHEMA", description: "the schema or parameter" },
+    { id: "reference", kinds: ["REFERENCE", "CALL", "IMPORT"], capability: "FIND_REFERENCES", description: "references" },
+    { id: "caller", kinds: ["CALL"], capability: "FIND_CALLERS", description: "callers" },
+    { id: "route", kinds: ["ROUTE"], capability: "ROUTE_SEARCH", description: "API routes that use it" },
+  ],
+  DEPENDENCY_ANALYSIS: [{ id: "graph", kinds: ["IMPORT", "GRAPH_EDGE"], capability: "IMPORT_GRAPH", description: "dependency edges" }],
+  CYCLE_DETECTION: [{ id: "cycle", kinds: ["CYCLE"], capability: "CYCLE_DETECTION", description: "a completed cycle detection" }],
+  SCHEMA_ANALYSIS: [{ id: "schema", kinds: ["SCHEMA"], capability: "AST_SCHEMA", description: "a schema definition" }],
+  TRACE_FLOW: [
+    { id: "call", kinds: ["CALL", "GRAPH_EDGE"], capability: "CALL_GRAPH", description: "call relationships" },
+    { id: "definition", kinds: ["DEFINITION"], capability: "FIND_DEFINITION", description: "the flow endpoints" },
+  ],
+  GENERAL_EXPLORATION: [],
+}
+
+/** Requirements still missing for the current intents. */
+export function coverageGaps(context: InvestigationContext): CoverageGap[] {
+  const attempted = new Set(context.decisions.filter((item) => item.verdict !== "REJECT").map((item) => item.capability))
+  const present = new Set(context.evidence.map((item) => item.type))
+  const gaps: CoverageGap[] = []
+  const seen = new Set<string>()
+  for (const intent of context.intents) {
+    for (const requirement of REQUIREMENTS[intent] ?? []) {
+      if (seen.has(requirement.id)) continue
+      seen.add(requirement.id)
+      const satisfied = requirement.kinds.some((kind) => present.has(kind)) || attempted.has(requirement.capability)
+      if (!satisfied) gaps.push({ ...requirement, suggestedCapability: requirement.capability })
+    }
+  }
+  return gaps
+}
+
+/** True when the intents have no structural requirements, or all are covered. */
+export function coverageComplete(context: InvestigationContext): boolean {
+  return coverageGaps(context).length === 0
+}
+
+/** Pick the most code-like entity for a gap-filling target. */
+export function bestEntity(context: InvestigationContext): string | null {
+  const candidates = context.entities.filter(Boolean)
+  if (!candidates.length) return null
+  const scored = candidates.map((entity) => {
+    const identifier = /[_A-Z]/.test(entity) && /^[A-Za-z_][\w]*$/.test(entity)
+    const hits = context.evidence.filter((item) => (item.snippet ?? "").includes(entity) || item.file.includes(entity)).length
+    return { entity, score: (identifier ? 2 : 0) + hits + entity.length / 100 }
+  })
+  return scored.sort((a, b) => b.score - a.score)[0].entity
+}
+
+export function gapTarget(gap: CoverageGap, context: InvestigationContext): InvestigationTarget {
+  const entity = bestEntity(context)
+  if (!entity) return {}
+  if (gap.suggestedCapability === "FIND_DEFINITION" || gap.suggestedCapability === "READ_SYMBOL" || gap.suggestedCapability === "FIND_CALLERS" || gap.suggestedCapability === "FIND_CALLEES" || gap.suggestedCapability === "SYMBOL_SEARCH") {
+    const symbol = context.evidence.map((item) => item.symbol).find((value): value is string => Boolean(value))
+    return { symbol: symbol ?? entity }
+  }
+  return { query: entity }
+}
 
 export interface JevInput {
   proposal: ActionProposal
@@ -71,6 +177,12 @@ function signature(proposal: ActionProposal): string {
 }
 
 export function evidenceSufficient(context: InvestigationContext, policy: JevPolicy): boolean {
+  const structural = context.intents.some((intent) => (REQUIREMENTS[intent] ?? []).length > 0)
+  if (structural) {
+    // A structural question is answerable as soon as its required evidence is
+    // covered; match volume and an action floor are irrelevant.
+    return coverageComplete(context) && context.evidence.length >= 2
+  }
   if (context.budget.actions < policy.minActionsBeforeAnswer) return false
   if (context.evidence.length < policy.answerEvidenceCount) return false
   const strong = context.evidence.filter((item) => item.confidence >= 0.7).length
@@ -224,13 +336,31 @@ export function decide(input: JevInput, policy: JevPolicy = DEFAULT_POLICY): JEV
     })
   }
 
-  // Sufficiency: if the evidence already supports an answer, prefer answering.
+  // Sufficiency: only when the intent's required evidence is covered.
   if (evidenceSufficient(context, policy) && !isVerification(proposal.capability)) {
     return decision(input, {
       decision: "ANSWER",
       verdict: "REJECT",
-      reason: "The collected evidence is sufficient for a reliable answer.",
+      reason: "The required evidence for this investigation is covered.",
       confidence: averageConfidence(context),
+    })
+  }
+
+  // Gap-driven control (role.md section 2): if a structural requirement is
+  // still missing and the proposal does not fill it, JEV selects the
+  // gap-filling capability instead of allowing another unhelpful action.
+  const gaps = coverageGaps(context)
+  if (gaps.length > 0 && context.budget.actions >= 1 && !isVerification(proposal.capability) && !proposalFillsGap(proposal, gaps, registry)) {
+    const gap = gaps[0]
+    return decision(input, {
+      decision: "EXPLORE",
+      verdict: "MODIFY",
+      capability: gap.suggestedCapability,
+      target: gapTarget(gap, context),
+      constraints: { maxResults: 30, maxDepth: 2 },
+      reason: `The investigation still needs ${gap.description}. Using ${gap.suggestedCapability} instead of ${proposal.capability}.`,
+      expectedInformationGain: registry.get(gap.suggestedCapability)?.expectedInformationGain,
+      cost: registry.get(gap.suggestedCapability)?.cost,
     })
   }
 
@@ -287,6 +417,12 @@ export function detectLoop(proposal: ActionProposal, context: InvestigationConte
     seen.set(item.capability, item.count)
   }
   return null
+}
+
+function proposalFillsGap(proposal: ActionProposal, gaps: CoverageGap[], registry: CapabilityRegistry): boolean {
+  const capability = registry.get(proposal.capability)
+  const produces = capability?.produces ?? []
+  return gaps.some((gap) => gap.suggestedCapability === proposal.capability || produces.some((kind) => gap.kinds.includes(kind as EvidenceType)))
 }
 
 function constraintOf(proposal: ActionProposal): InvestigationConstraints {
@@ -357,17 +493,24 @@ function planEscalation(capability: CapabilityId, context: InvestigationContext,
 }
 
 function detectAmbiguity(context: InvestigationContext): string | null {
-  const definitions = context.evidence.filter((item) => item.type === "DEFINITION")
+  // Ambiguity means the SAME symbol has multiple equally relevant definitions in
+  // different files. Different symbols found by one search are not ambiguous.
+  const definitions = context.evidence.filter((item) => item.type === "DEFINITION" && item.symbol)
   if (definitions.length < 2) return null
-  const groups = new Map<string, number>()
+  const byName = new Map<string, typeof definitions>()
   for (const item of definitions) {
-    const key = `${item.file}:${item.symbol ?? ""}`
-    groups.set(key, (groups.get(key) ?? 0) + 1)
+    const name = item.symbol as string
+    const list = byName.get(name) ?? []
+    list.push(item)
+    byName.set(name, list)
   }
-  if (groups.size === 2 && definitions.length === 2) {
-    const names = [...groups.keys()]
-    const confidences = definitions.map((item) => item.confidence)
-    if (Math.abs(confidences[0] - confidences[1]) < 0.05) return `two candidates with equal relevance (${names.join(", ")})`
+  for (const [name, items] of byName) {
+    const files = new Set(items.map((item) => item.file))
+    if (files.size < 2) continue
+    const confidences = items.map((item) => item.confidence)
+    if (Math.max(...confidences) - Math.min(...confidences) < 0.05) {
+      return `the symbol "${name}" is defined in ${[...files].join(", ")}`
+    }
   }
   return null
 }

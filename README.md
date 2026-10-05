@@ -163,6 +163,10 @@ override a model decision that violates them.
 - Each decision is one bounded call (`CONTROLLED_JEV_TIMEOUT_MS`, default
   `15000`). On timeout, error or an unparseable answer, JEV falls back to the
   deterministic policy and records a `JEV_FALLBACK` event.
+- The model id is validated against the instance catalog before it is called
+  (lazily, once, bounded). A model that does not exist is never called, so it
+  cannot produce a visible provider error; JEV simply uses the deterministic
+  policy and reports the reason in `controlled_config`.
 - Set the model to `heuristic` to disable the model and use the deterministic
   policy only.
 
@@ -186,6 +190,38 @@ controlled_config { "jevModel": "opencode/space-bunny-free" }
 
 Every change is recorded as a `JEV_MODEL_CHANGED` event. The visualizer header
 shows the active decision model.
+
+### Search quality and coverage
+
+Two rules keep the investigation honest and make the answer reachable:
+
+**Ranked, truncation-aware search.** Every file is classified
+(`source | test | generated | fixture | docs | config | script`). Search results
+are ranked: definition lines first, then real source, then scripts, tests,
+fixtures and generated output. Each result reports `total`, `showing`,
+`truncated` and the top files with match counts, so a capped result is never
+mistaken for a complete one. `target.file` or `parameters.pathPrefix` narrows a
+search, and `parameters.offset` pages it.
+
+**Coverage-based sufficiency.** JEV does not answer on match volume. Each intent
+declares the evidence it needs, for example:
+
+| Intent | Required evidence |
+| --- | --- |
+| `FIND_API`, `ROUTE_ANALYSIS` | a route and a definition |
+| `FIND_DEFINITION`, `FIND_FUNCTION` | a definition |
+| `FIND_REFERENCE` | references, calls or imports |
+| `IMPACT_ANALYSIS` | references and callers |
+| `SAFE_REMOVAL` | schema, references, callers and routes |
+| `DEPENDENCY_ANALYSIS` | import or graph edges |
+| `CYCLE_DETECTION` | a completed cycle detection |
+
+The investigation answers only when those groups are covered (or their
+capability was attempted). Until then JEV is **gap-driven**: if the proposal
+does not close a missing group, JEV selects the capability that does and
+returns `MODIFY`. A run that keeps issuing text searches is steered to
+`ROUTE_SEARCH`, `FIND_DEFINITION` or `READ_SYMBOL` instead. The step result
+lists the remaining gaps and the capability that closes each one.
 
 ### XState controller
 
@@ -211,7 +247,7 @@ AST: `AST_SEARCH`, `AST_FUNCTION`, `AST_CLASS`, `AST_SCHEMA`, `AST_IMPORT`,
 `AST_DECORATOR`, `AST_PARAMETER`.
 
 Symbol: `SYMBOL_SEARCH`, `FIND_DEFINITION`, `FIND_REFERENCES`,
-`FIND_CALLERS`, `FIND_CALLEES`, `FIND_IMPLEMENTATIONS`.
+`FIND_CALLERS`, `FIND_CALLEES`, `FIND_IMPLEMENTATIONS`, `READ_SYMBOL`.
 
 API: `ROUTE_SEARCH`, `ENDPOINT_DEFINITION`, `REQUEST_SCHEMA`,
 `RESPONSE_SCHEMA`, `VALIDATION`, `AUTHORIZATION`, `API_IMPLEMENTATION`.

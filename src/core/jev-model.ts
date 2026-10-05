@@ -1,7 +1,7 @@
 import { hasCapability } from "../capabilities/execute"
 import { budgetRemaining } from "./budget"
 import { newDecisionId } from "./ids"
-import { averageConfidence, decide, globalConstraints, isVerification, type JevInput, type JevPolicy, DEFAULT_POLICY } from "./jev"
+import { averageConfidence, coverageGaps, decide, globalConstraints, isVerification, type JevInput, type JevPolicy, DEFAULT_POLICY } from "./jev"
 import type { CapabilityRegistry } from "./registry"
 import type {
   ActionProposal,
@@ -38,6 +38,8 @@ export interface JevModelRequest {
   budget: { actions: number; maxActions: number; llmIterations: number; maxLLMIterations: number; remaining: number }
   depth: number
   maxDepth: number
+  /** Required evidence still missing for the current intents. */
+  gaps: Array<{ id: string; description: string; capability: string }>
   machineState: string
   capabilities: Array<{ id: string; category: string; cost: number; expectedInformationGain: number; description: string }>
 }
@@ -101,6 +103,7 @@ export function buildJevRequest(input: JevInput): JevModelRequest {
     },
     depth: context.depth,
     maxDepth: input.restrictions?.maxDepth ?? context.budget.maxGraphDepth,
+    gaps: coverageGaps(context).map((gap) => ({ id: gap.id, description: gap.description, capability: gap.suggestedCapability })),
     machineState: input.machineState,
     capabilities: registry.list().map((capability) => ({
       id: capability.id,
@@ -173,6 +176,11 @@ function extractJson(text: string): string | null {
 
 /** A decision model backed by an OpenCode model through the plugin client. */
 export class OpenCodeJevModel implements JevModel {
+  private failures = 0
+  private checked = false
+  private available = true
+  private static readonly MAX_FAILURES = 2
+
   constructor(
     private readonly options: {
       id: string
@@ -181,6 +189,8 @@ export class OpenCodeJevModel implements JevModel {
       invoke: ModelInvoker
       timeoutMs?: number
       onError?: (error: Error) => void
+      /** Lazy availability check. A false result disables the model. */
+      available?: () => Promise<boolean>
     },
   ) {}
 
@@ -188,7 +198,27 @@ export class OpenCodeJevModel implements JevModel {
     return this.options.model
   }
 
+  get unavailable(): boolean {
+    return this.failures >= OpenCodeJevModel.MAX_FAILURES
+  }
+
   async decide(request: JevModelRequest): Promise<JevModelOutput | null> {
+    if (this.unavailable) return null
+    if (!this.checked) {
+      this.checked = true
+      if (this.options.available) {
+        try {
+          this.available = await this.options.available()
+        } catch {
+          this.available = false
+        }
+        if (!this.available) {
+          this.failures = OpenCodeJevModel.MAX_FAILURES
+          this.options.onError?.(new Error(`Decision model ${this.options.model} is not available`))
+          return null
+        }
+      }
+    }
     try {
       const text = await this.options.invoke({
         model: this.options.model,
@@ -196,8 +226,15 @@ export class OpenCodeJevModel implements JevModel {
         user: JSON.stringify(request, null, 2),
         timeoutMs: this.options.timeoutMs ?? DEFAULT_JEV_TIMEOUT_MS,
       })
-      return parseJevOutput(text)
+      const parsed = parseJevOutput(text)
+      if (!parsed) {
+        this.failures += 1
+        return null
+      }
+      this.failures = 0
+      return parsed
     } catch (error) {
+      this.failures += 1
       this.options.onError?.(error as Error)
       return null
     }
@@ -292,8 +329,8 @@ export class JevEngine {
       return null
     }
 
-    if (output.decision === "ANSWER" && context.evidence.length === 0) {
-      return overridden("The decision model tried to answer without evidence.")
+    if (output.decision === "ANSWER" && (context.evidence.length === 0 || coverageGaps(context).length > 0)) {
+      return overridden("The decision model tried to answer before the required evidence was covered.")
     }
     return null
   }
